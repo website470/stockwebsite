@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import dynamic from "next/dynamic";
+import { getMarketStatus, getEffectiveEndTime } from "@/utils/marketHours";
 
 // Lazy-load the chart (it uses browser APIs — not SSR safe)
 const CandlestickChart = dynamic(() => import("./CandlestickChart"), {
@@ -32,9 +33,9 @@ interface StockData {
   history: Candle[];
 }
 
-function generateSyntheticHistory(startPrice: number, endPrice: number, steps: number = 60): Candle[] {
+function generateSyntheticHistory(startPrice: number, endPrice: number, steps: number = 60, endTime?: number): Candle[] {
   const history: Candle[] = [];
-  const now = Math.floor(Date.now() / 1000);
+  const baseEnd = endTime || Math.floor(Date.now() / 1000);
   const stepTime = 60; // 1 minute per step
 
   let currentVal = startPrice;
@@ -60,7 +61,7 @@ function generateSyntheticHistory(startPrice: number, endPrice: number, steps: n
     const low = Math.min(open, close) - Math.abs(open - close) * Math.random();
 
     history.push({
-      time: now - (steps - i) * stepTime,
+      time: baseEnd - (steps - i) * stepTime,
       open,
       high,
       low,
@@ -86,26 +87,32 @@ export default function StockWidget() {
   } as StockData & { lastUpdateTime?: string });
 
   useEffect(() => {
-    let currentHistory: Candle[] = []; // Local mutable copy for the interval closure
+    let currentHistory: Candle[] = [];
+    let isFetching = false;
 
     const fetchData = async () => {
+      const status = getMarketStatus();
+      
+      // If market is closed AND we already have data, don't fetch anymore.
+      // This ensures we fetch at least once on mount even if closed.
+      if (!status.isOpen && currentHistory.length > 0) return;
+      if (isFetching) return;
+
+      isFetching = true;
       try {
         const res = await fetch("/api/stock/connplex");
         if (res.ok) {
           const json = await res.json();
           if (json.priceInfo) {
             const newPrice = json.priceInfo.lastPrice;
-            const allTimeHigh = json.priceInfo.upperCP;
-            console.log("alltimehigh", allTimeHigh);
 
             if (currentHistory.length === 0) {
-              // Generate baseline history starting from 186.25 up to current newPrice
-              currentHistory = generateSyntheticHistory(186.25, newPrice, 100);
-            } else {
-              // If we already have history, just append the new live data point
+              const effectiveEnd = getEffectiveEndTime();
+              currentHistory = generateSyntheticHistory(186.25, newPrice, 100, effectiveEnd);
+            } else if (status.isOpen) {
               const lastPoint = currentHistory[currentHistory.length - 1];
-              // Avoid duplicates if price/time is unchanged. Adding new point for demonstration.
               const nowTime = Math.floor(Date.now() / 1000);
+              
               if (nowTime > lastPoint.time) {
                 const open = lastPoint.close;
                 const close = newPrice;
@@ -136,11 +143,13 @@ export default function StockWidget() {
         }
       } catch (err) {
         console.error("Error fetching stock data:", err);
+      } finally {
+        isFetching = false;
       }
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 5000); // Polling every 5s instead of 2s for real API
+    const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, []);
 
